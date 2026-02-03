@@ -1,2 +1,4 @@
 .venv/
 llama.bin
+vocab.bin
+ai.code-workspace
