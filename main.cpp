@@ -1,4 +1,4 @@
-#include "bpe.h" // include BPE interface
+#include "bpe.h"
 
 #include <cstdio>
 #include <cstdlib>
