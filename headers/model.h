@@ -50,7 +50,7 @@ struct Model {
     char* mmap_data;
 
     Tensor<2> token_embed;
-    TransformerBlock* layers; // 12 layers for llama3
+    TransformerBlock* layers; // 16 layers for llama3
     RMSNorm final_norm; // just befor output projection
     Tensor<2> output_head;
 
