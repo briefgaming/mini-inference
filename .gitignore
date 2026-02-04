@@ -2,3 +2,5 @@
 llama.bin
 vocab.bin
 ai.code-workspace
+inference
+headers/json.hpp

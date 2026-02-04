@@ -48,6 +48,7 @@ class MemoryMapWeights:
         file_name = self.model_config.indexes_file_name
         with open(file_name, "w") as f:
             json.dump(self.layer_tensor, f)
+        print(f"{self.layer_tensor.keys()=}")
         print(f"Saved layer indexes to {file_name}")
 
     def _calculate_offsets(self, key: str):
@@ -86,7 +87,7 @@ class MemoryMapWeights:
         end_idx = start_idx + (offset[1] - offset[0])
 
         w = np.frombuffer(
-            self.mm[start_idx:end_idx], dtype=np.float16
+            self.mm[start_idx:end_idx], dtype=np.uint16
         )  # Zero-copy transformation
         w = w.reshape(shape)
         w = w.T.copy()
