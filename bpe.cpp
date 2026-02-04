@@ -1,4 +1,4 @@
-#include "bpe.h"
+#include "headers/bpe.h"
 
 #include <fstream>
 #include <unordered_map>

@@ -1,4 +1,5 @@
-#include "bpe.h"
+#include "headers/bpe.h"
+#include "headers/model.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +41,20 @@ int main() {
     char decoded[4096];
     decoder.decode(token_buf, ntokens, decoded, sizeof(decoded));
     std::printf("Decoded: %s\n", decoded);
+
+    Model m;
+
+    // load weights config into model
+    m.load_config("configs/llama3_config.json");
+
+    WeightMap w;
+
+    // load weight mapping into a map for O(1) access
+    w.load("configs/model_index.json");
+
+    // pass memory location of weights into model
+    m.load_weights(w, "scripts/llama.bin");
+
 
     return 0;
 }
