@@ -48,7 +48,6 @@ class MemoryMapWeights:
         file_name = self.model_config.indexes_file_name
         with open(file_name, "w") as f:
             json.dump(self.layer_tensor, f)
-        print(f"{self.layer_tensor.keys()=}")
         print(f"Saved layer indexes to {file_name}")
 
     def _calculate_offsets(self, key: str):

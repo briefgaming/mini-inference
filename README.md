@@ -12,6 +12,8 @@ wget https://github.com/nlohmann/json/releases/download/v3.11.2/json.hpp
 # Compile code and execute binary
 g++ -o inference  bpe.cpp model.cpp weights.cpp main.cpp -std=c++23 && ./inference
 ```
+### Note
+1. Uses modern C++ features so compile with C++20 and above
 
 References
 1. [Llama2.c](https://github.com/karpathy/llama2.c)
