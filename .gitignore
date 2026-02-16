@@ -1,5 +1,6 @@
 .venv/
 llama.bin
+llama_f32.bin
 vocab.bin
 ai.code-workspace
 inference

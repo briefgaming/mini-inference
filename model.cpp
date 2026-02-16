@@ -29,7 +29,7 @@ Model::~Model() {
     }
 }
 
-static inline void matmul(Tensor<1>& out, const Tensor<1>& x, const Tensor<2>& w_f32) {
+static inline void matmul(Tensor<1> &out, const Tensor<1> &x, const Tensor<2> &w_f32) {
     const int in_dim = x.dim(0);
     const int out_dim = out.dim(0);
     assert(w_f32.dim(0) == in_dim);
@@ -92,13 +92,13 @@ void Model::load_weights(WeightMap& w, const std::string& weight_path) {
     std::cout << "Allocating " << n_layers << " transformer blocks..." << std::endl;
     layers = new TransformerBlock[n_layers];
 
-    token_embed = Tensor<2, bf16>(
-        w.get_ptr<bf16>("model.embed_tokens.weight", mmap_data),
+    token_embed = Tensor<2>(
+        w.get_ptr<float>("model.embed_tokens.weight", mmap_data),
         vocab_size,
         dim
     );
-    final_norm.weight = Tensor<1, bf16>(
-        w.get_ptr<bf16>("model.norm.weight", mmap_data),
+    final_norm.weight = Tensor<1>(
+        w.get_ptr<float>("model.norm.weight", mmap_data),
         dim
     );
 
@@ -108,49 +108,49 @@ void Model::load_weights(WeightMap& w, const std::string& weight_path) {
     for (int i = 0; i < n_layers; ++i) {
         const std::string prefix = "model.layers." + std::to_string(i) + ".";
 
-        layers[i].attn.wq = Tensor<2, bf16>(
-            w.get_ptr<bf16>(prefix + "self_attn.q_proj.weight", mmap_data),
+        layers[i].attn.wq = Tensor<2, float>(
+            w.get_ptr<float>(prefix + "self_attn.q_proj.weight", mmap_data),
             dim,
             dim
         );
-        layers[i].attn.wk = Tensor<2, bf16>(
-            w.get_ptr<bf16>(prefix + "self_attn.k_proj.weight", mmap_data),
+        layers[i].attn.wk = Tensor<2, float>(
+            w.get_ptr<float>(prefix + "self_attn.k_proj.weight", mmap_data),
             dim,
             kv_dim
         );
-        layers[i].attn.wv = Tensor<2, bf16>(
-            w.get_ptr<bf16>(prefix + "self_attn.v_proj.weight", mmap_data),
+        layers[i].attn.wv = Tensor<2, float>(
+            w.get_ptr<float>(prefix + "self_attn.v_proj.weight", mmap_data),
             dim,
             kv_dim
         );
-        layers[i].attn.wo = Tensor<2, bf16>(
-            w.get_ptr<bf16>(prefix + "self_attn.o_proj.weight", mmap_data),
+        layers[i].attn.wo = Tensor<2, float>(
+            w.get_ptr<float>(prefix + "self_attn.o_proj.weight", mmap_data),
             dim,
             dim
         );
 
-        layers[i].mlp.w1_gate = Tensor<2, bf16>(
-            w.get_ptr<bf16>(prefix + "mlp.gate_proj.weight", mmap_data),
+        layers[i].mlp.w1_gate = Tensor<2, float>(
+            w.get_ptr<float>(prefix + "mlp.gate_proj.weight", mmap_data),
             dim,
             hidden_dim
         );
-        layers[i].mlp.w1_up = Tensor<2, bf16>(
-            w.get_ptr<bf16>(prefix + "mlp.up_proj.weight", mmap_data),
+        layers[i].mlp.w1_up = Tensor<2, float>(
+            w.get_ptr<float>(prefix + "mlp.up_proj.weight", mmap_data),
             dim,
             hidden_dim
         );
-        layers[i].mlp.w1_down = Tensor<2, bf16>(
-            w.get_ptr<bf16>(prefix + "mlp.down_proj.weight", mmap_data),
+        layers[i].mlp.w1_down = Tensor<2, float>(
+            w.get_ptr<float>(prefix + "mlp.down_proj.weight", mmap_data),
             hidden_dim,
             dim
         );
 
-        layers[i].pre_attn_norm.weight = Tensor<1, bf16>(
-            w.get_ptr<bf16>(prefix + "input_layernorm.weight", mmap_data),
+        layers[i].pre_attn_norm.weight = Tensor<1, float>(
+            w.get_ptr<float>(prefix + "input_layernorm.weight", mmap_data),
             dim
         );
-        layers[i].post_ffn_norm.weight = Tensor<1, bf16>(
-            w.get_ptr<bf16>(prefix + "post_attention_layernorm.weight", mmap_data),
+        layers[i].post_ffn_norm.weight = Tensor<1, float>(
+            w.get_ptr<float>(prefix + "post_attention_layernorm.weight", mmap_data),
             dim
         );
     }
@@ -187,8 +187,7 @@ bool Model::load_config(const std::string& config_path) {
 
 void RMSNorm::rmsnorm(Tensor<1>& out, const Tensor<1>& in, float eps) {
     assert(out.dim(0) == in.dim(0));
-    Tensor<1> w_f32 = weight.dequantize_to_f32();
-    assert(w_f32.dim(0) == in.dim(0));
+    assert(weight.dim(0) == in.dim(0));
 
     const int d = in.dim(0);
     float sum_squares = 0.0f;
@@ -198,15 +197,15 @@ void RMSNorm::rmsnorm(Tensor<1>& out, const Tensor<1>& in, float eps) {
 
     const float inv_rms = 1.0f / std::sqrt(sum_squares / static_cast<float>(d) + eps);
     for (int i = 0; i < d; ++i) {
-        out[i] = in[i] * inv_rms * w_f32[i];
+        out[i] = in[i] * inv_rms * weight[i];
     }
 }
 
 void GQAttention::rope(float* head_vec, int head_dim, int pos, float rope_theta) {
     for (int m = 0; m < head_dim / 2; ++m) {
-        const float exp_term = (2 * m) / head_dim;
+        const float exp_term = static_cast<float>(2 * m) / static_cast<float>(head_dim);
         const float inv_freq = std::pow(rope_theta, -exp_term);
-        const float theta = pos * inv_freq;
+        const float theta = static_cast<float>(pos) * inv_freq;
         const float c = std::cos(theta);
         const float s = std::sin(theta);
 
@@ -232,20 +231,15 @@ void GQAttention::gqattention(
 ) {
     const int dim = x.dim(0);
     const int kv_dim_local = n_kv_heads * head_dim;
-    const int n_rep = n_heads / n_kv_heads;
+    const int q_kv_head_ratio = n_heads / n_kv_heads; // 4 q_heads for every kv_head
     assert(out.dim(0) == dim);
-
-    Tensor<2> wq_f32 = wq.dequantize_to_f32(); // [dim, dim]
-    Tensor<2> wk_f32 = wk.dequantize_to_f32(); // [dim, kv_dim]
-    Tensor<2> wv_f32 = wv.dequantize_to_f32(); // [dim, kv_dim]
-    Tensor<2> wo_f32 = wo.dequantize_to_f32(); // [dim, dim]
 
     Tensor<1> q_flat(dim);
     Tensor<1> k_flat(kv_dim_local);
     Tensor<1> v_flat(kv_dim_local);
-    matmul(q_flat, x, wq_f32);
-    matmul(k_flat, x, wk_f32);
-    matmul(v_flat, x, wv_f32);
+    matmul(q_flat, x, wq);
+    matmul(k_flat, x, wk);
+    matmul(v_flat, x, wv);
 
     // Apply RoPE on every query and key in each head.
     for (int h = 0; h < n_heads; ++h) {
@@ -268,10 +262,11 @@ void GQAttention::gqattention(
     const float scale = 1.0f / std::sqrt(head_dim);
 
     for (int h = 0; h < n_heads; ++h) {
-        const int hk = h / n_rep;
+        const int hk = h / q_kv_head_ratio;
         const float* qh = q_flat.data() + h * head_dim;
 
         float max_score = -std::numeric_limits<float>::infinity();
+        // dot product of current q with the kv of all computed tokens in the same head
         for (int t = 0; t <= pos; ++t) {
             float s = 0.0f;
             for (int d = 0; d < head_dim; ++d) {
@@ -300,25 +295,21 @@ void GQAttention::gqattention(
         }
     }
 
-    matmul(out, ctx_flat, wo_f32);
+    matmul(out, ctx_flat, wo);
 }
 
 void SwiGLUBlock::swiglu(Tensor<1>& out, const Tensor<1>& in) {
-    Tensor<2> gate_f32 = w1_gate.dequantize_to_f32(); // [dim, hidden_dim]
-    Tensor<2> up_f32 = w1_up.dequantize_to_f32();     // [dim, hidden_dim]
-    Tensor<2> down_f32 = w1_down.dequantize_to_f32(); // [hidden_dim, dim]
+    Tensor<1> g(w1_gate.dim(1));
+    Tensor<1> u(w1_up.dim(1));
+    Tensor<1> h(w1_down.dim(0));
 
-    Tensor<1> g(gate_f32.dim(1));
-    Tensor<1> u(up_f32.dim(1));
-    Tensor<1> h(down_f32.dim(0));
-
-    matmul(g, in, gate_f32);
-    matmul(u, in, up_f32);
+    matmul(g, in, w1_gate);
+    matmul(u, in, w1_up);
     for (int i = 0; i < h.dim(0); ++i) {
         h[i] = silu(g[i]) * u[i];
     }
 
-    matmul(out, h, down_f32);
+    matmul(out, h, w1_down);
 }
 
 void TransformerBlock::apply_transformer(
@@ -363,7 +354,7 @@ void Model::forward(
     */
     Tensor<1> x(dim); 
     for (int i = 0; i < dim; ++i) {
-        x[i] = token_embed(token_id, i).to_float();
+        x[i] = token_embed(token_id, i);
     }
 
     for (int l = 0; l < n_layers; ++l) {
@@ -387,7 +378,7 @@ void Model::forward(
     for (int j = 0; j < vocab_size; ++j) {
         float s = 0.0f;
         for (int i = 0; i < dim; ++i) {
-            s += norm_out[i] * output_head(j, i).to_float();
+            s += norm_out[i] * output_head(j, i);
         }
         logits_out[j] = s;
     }

@@ -4,12 +4,12 @@
 #include <string>
 #include <vector>
 
-#include "bf16.h"
+#include "float.h"
 #include "tensor.h"
 #include "weights.h"
 
 struct RMSNorm {
-    Tensor<1, bf16> weight;
+    Tensor<1, float> weight;
 
     void rmsnorm(Tensor<1> &out, const Tensor<1> &in, float eps);
 };
@@ -17,10 +17,10 @@ struct RMSNorm {
 // Grouped Query Attention
 // GQA uses half the dim of q for kv matrices
 struct GQAttention {
-    Tensor<2, bf16> wq; // [dim, dim]
-    Tensor<2, bf16> wk; // [dim, kv_dim]
-    Tensor<2, bf16> wv; // [dim, kv_dim]
-    Tensor<2, bf16> wo; // [dim, dim]
+    Tensor<2, float> wq; // [dim, dim]
+    Tensor<2, float> wk; // [dim, kv_dim]
+    Tensor<2, float> wv; // [dim, kv_dim]
+    Tensor<2, float> wo; // [dim, dim]
 
     // Apply with RoPE
     // https://arxiv.org/abs/2104.09864
@@ -39,9 +39,9 @@ struct GQAttention {
 };
 
 struct SwiGLUBlock {
-    Tensor<2, bf16> w1_gate; // Gate projection to hidden dim (4x)
-    Tensor<2, bf16> w1_up; // Up projection to hidden dim (4x)
-    Tensor<2, bf16> w1_down; // Down projection to original model dim
+    Tensor<2, float> w1_gate; // Gate projection to hidden dim (4x)
+    Tensor<2, float> w1_up; // Up projection to hidden dim (4x)
+    Tensor<2, float> w1_down; // Down projection to original model dim
 
     void swiglu(Tensor<1> &out, const Tensor<1> &in);
 };
@@ -81,16 +81,16 @@ struct Model {
     char* mmap_data;
     size_t mmap_size;
 
-    Tensor<2, bf16> token_embed; // embed is a 2d tensor
+    Tensor<2> token_embed; // embed is a 2d tensor
     TransformerBlock* layers; // 16 layers for llama3
     RMSNorm final_norm; // just before output projection
-    Tensor<2, bf16> output_head;
+    Tensor<2> output_head;
 
     Model();
     ~Model();
 
-    void load_weights(WeightMap& w, const std::string& weight_path);
-    bool load_config(const std::string& config_path);
+    void load_weights(WeightMap &w, const std::string &weight_path);
+    bool load_config(const std::string &config_path);
 
     void forward(
         int token_id,
