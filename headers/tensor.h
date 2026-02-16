@@ -129,11 +129,11 @@ public:
     }
 
     int dim(int i) const { 
-        return shape_[static_cast<size_t>(i)];
+        return shape_[i];
     }
 
     int stride(int i) const {
-        return stride_[static_cast<size_t>(i)];
+        return stride_[i];
     }
 
     const std::array<int, N>& shape() const {
@@ -147,7 +147,7 @@ public:
     int size() const {
         int total = 1;
         for (int i = 0; i < N; i++) {
-            total *= shape_[static_cast<size_t>(i)];
+            total *= shape_[i];
         }
         return total;
     }
