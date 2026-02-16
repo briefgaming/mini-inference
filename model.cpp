@@ -29,7 +29,7 @@ Model::~Model() {
     }
 }
 
-static inline void matvec(Tensor<1>& out, const Tensor<1>& x, const Tensor<2>& w_f32) {
+static inline void matmul(Tensor<1>& out, const Tensor<1>& x, const Tensor<2>& w_f32) {
     const int in_dim = x.dim(0);
     const int out_dim = out.dim(0);
     assert(w_f32.dim(0) == in_dim);
@@ -46,6 +46,12 @@ static inline void matvec(Tensor<1>& out, const Tensor<1>& x, const Tensor<2>& w
 
 static inline float silu(float z) {
     return z / (1.0f + std::exp(-z));
+}
+
+static inline void residual_connection(Tensor<1> &out, Tensor<1> &in) {
+    for (int i = 0; i < out.dim(0); ++i) {
+        out[i] += in[i];
+    }
 }
 
 void Model::load_weights(WeightMap& w, const std::string& weight_path) {
@@ -198,9 +204,9 @@ void RMSNorm::rmsnorm(Tensor<1>& out, const Tensor<1>& in, float eps) {
 
 void GQAttention::rope(float* head_vec, int head_dim, int pos, float rope_theta) {
     for (int m = 0; m < head_dim / 2; ++m) {
-        const float exp_term = static_cast<float>(2 * m) / static_cast<float>(head_dim);
+        const float exp_term = (2 * m) / head_dim;
         const float inv_freq = std::pow(rope_theta, -exp_term);
-        const float theta = static_cast<float>(pos) * inv_freq;
+        const float theta = pos * inv_freq;
         const float c = std::cos(theta);
         const float s = std::sin(theta);
 
@@ -237,11 +243,11 @@ void GQAttention::gqattention(
     Tensor<1> q_flat(dim);
     Tensor<1> k_flat(kv_dim_local);
     Tensor<1> v_flat(kv_dim_local);
-    matvec(q_flat, x, wq_f32);
-    matvec(k_flat, x, wk_f32);
-    matvec(v_flat, x, wv_f32);
+    matmul(q_flat, x, wq_f32);
+    matmul(k_flat, x, wk_f32);
+    matmul(v_flat, x, wv_f32);
 
-    // Apply RoPE on every query head and KV head.
+    // Apply RoPE on every query and key in each head.
     for (int h = 0; h < n_heads; ++h) {
         rope(q_flat.data() + h * head_dim, head_dim, pos, rope_theta);
     }
@@ -258,8 +264,8 @@ void GQAttention::gqattention(
     }
 
     Tensor<1> ctx_flat(dim);
-    std::vector<float> scores(static_cast<size_t>(pos + 1), 0.0f);
-    const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+    std::vector<float> scores(pos + 1, 0.0f);
+    const float scale = 1.0f / std::sqrt(head_dim);
 
     for (int h = 0; h < n_heads; ++h) {
         const int hk = h / n_rep;
@@ -272,7 +278,7 @@ void GQAttention::gqattention(
                 s += qh[d] * kcache(t, hk, d);
             }
             s *= scale;
-            scores[static_cast<size_t>(t)] = s;
+            scores[t] = s;
             if (s > max_score) {
                 max_score = s;
             }
@@ -280,21 +286,21 @@ void GQAttention::gqattention(
 
         float denom = 0.0f;
         for (int t = 0; t <= pos; ++t) {
-            float e = std::exp(scores[static_cast<size_t>(t)] - max_score);
-            scores[static_cast<size_t>(t)] = e;
+            float e = std::exp(scores[t] - max_score);
+            scores[t] = e;
             denom += e;
         }
 
         for (int d = 0; d < head_dim; ++d) {
             float c = 0.0f;
             for (int t = 0; t <= pos; ++t) {
-                c += (scores[static_cast<size_t>(t)] / denom) * vcache(t, hk, d);
+                c += (scores[t] / denom) * vcache(t, hk, d);
             }
             ctx_flat[h * head_dim + d] = c;
         }
     }
 
-    matvec(out, ctx_flat, wo_f32);
+    matmul(out, ctx_flat, wo_f32);
 }
 
 void SwiGLUBlock::swiglu(Tensor<1>& out, const Tensor<1>& in) {
@@ -306,25 +312,25 @@ void SwiGLUBlock::swiglu(Tensor<1>& out, const Tensor<1>& in) {
     Tensor<1> u(up_f32.dim(1));
     Tensor<1> h(down_f32.dim(0));
 
-    matvec(g, in, gate_f32);
-    matvec(u, in, up_f32);
+    matmul(g, in, gate_f32);
+    matmul(u, in, up_f32);
     for (int i = 0; i < h.dim(0); ++i) {
         h[i] = silu(g[i]) * u[i];
     }
 
-    matvec(out, h, down_f32);
+    matmul(out, h, down_f32);
 }
 
 void TransformerBlock::apply_transformer(
-    Tensor<1>& x,
+    Tensor<1> &x,
     int pos,
     int n_heads,
     int n_kv_heads,
     int head_dim,
     float rope_theta,
     float rms_eps,
-    Tensor<3>& kcache,
-    Tensor<3>& vcache
+    Tensor<3> &kcache,
+    Tensor<3> &vcache
 ) {
     Tensor<1> x_norm(x.dim(0));
     Tensor<1> attn_out(x.dim(0));
@@ -333,29 +339,29 @@ void TransformerBlock::apply_transformer(
 
     pre_attn_norm.rmsnorm(x_norm, x, rms_eps);
     attn.gqattention(attn_out, x_norm, pos, n_heads, n_kv_heads, head_dim, rope_theta, kcache, vcache);
-    for (int i = 0; i < x.dim(0); ++i) {
-        x[i] += attn_out[i];
-    }
+    residual_connection(x, attn_out);
 
     post_ffn_norm.rmsnorm(ffn_in, x, rms_eps);
     mlp.swiglu(ffn_out, ffn_in);
-    for (int i = 0; i < x.dim(0); ++i) {
-        x[i] += ffn_out[i];
-    }
+    residual_connection(x, ffn_out);
 }
 
 void Model::forward(
     int token_id,
     int input_pos,
-    std::vector<Tensor<3>>& kcache,
-    std::vector<Tensor<3>>& vcache,
-    Tensor<1>& logits_out
+    std::vector<Tensor<3>> &kcache,
+    std::vector<Tensor<3>> &vcache,
+    Tensor<1> &logits_out
 ) {
     assert(token_id >= 0 && token_id < vocab_size);
-    assert(static_cast<int>(kcache.size()) == n_layers);
-    assert(static_cast<int>(vcache.size()) == n_layers);
+    assert(kcache.size() == n_layers);
+    assert(vcache.size() == n_layers);
 
-    Tensor<1> x(dim);
+    /***
+    What's happening here is that we are plucking the token embedding (token projection) from token_embed.
+    A row in token_embed is represented as a 1d tensor Tensor<1> x(dim).
+    */
+    Tensor<1> x(dim); 
     for (int i = 0; i < dim; ++i) {
         x[i] = token_embed(token_id, i).to_float();
     }

@@ -81,7 +81,7 @@ struct Model {
     char* mmap_data;
     size_t mmap_size;
 
-    Tensor<2, bf16> token_embed;
+    Tensor<2, bf16> token_embed; // embed is a 2d tensor
     TransformerBlock* layers; // 16 layers for llama3
     RMSNorm final_norm; // just before output projection
     Tensor<2, bf16> output_head;
