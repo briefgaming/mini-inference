@@ -1,7 +1,10 @@
 .venv/
 llama.bin
 llama_f32.bin
+llama_int8.bin
 vocab.bin
 ai.code-workspace
 inference
 headers/json.hpp
+explanations/
+__pycache__

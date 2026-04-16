@@ -7,8 +7,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -29,18 +34,225 @@ Model::~Model() {
     }
 }
 
-static inline void matmul(Tensor<1> &out, const Tensor<1> &x, const Tensor<2> &w_f32) {
+static inline bool is_float32_meta(const TensorMeta& meta) {
+    return meta.dtype == "F32";
+}
+
+static inline bool is_int8_meta(const TensorMeta& meta) {
+    return meta.dtype == "I8";
+}
+
+static bool bind_linear_weight(
+    LinearWeight& out,
+    const WeightMap& weights,
+    char* mmap_ptr,
+    const std::string& key,
+    int d0,
+    int d1
+) {
+    const TensorMeta* meta = weights.get_meta(key);
+    if (meta == nullptr) {
+        std::fprintf(stderr, "Missing tensor metadata for %s\n", key.c_str());
+        return false;
+    }
+
+    if (is_float32_meta(*meta)) {
+        out.dtype = MatrixDType::F32;
+        out.f32 = Tensor<2, float>(weights.get_ptr<float>(key, mmap_ptr), d0, d1);
+        out.i8 = Tensor<2, int8_t>();
+        out.scales = Tensor<1, float>();
+        return true;
+    }
+
+    if (is_int8_meta(*meta)) {
+        if (meta->scale_name.empty()) {
+            std::fprintf(stderr, "Quantized tensor %s is missing scale metadata\n", key.c_str());
+            return false;
+        }
+        const TensorMeta* scale_meta = weights.get_meta(meta->scale_name);
+        if (scale_meta == nullptr || !is_float32_meta(*scale_meta)) {
+            std::fprintf(stderr, "Quantized tensor %s has invalid scale tensor %s\n", key.c_str(), meta->scale_name.c_str());
+            return false;
+        }
+        out.dtype = MatrixDType::I8;
+        out.i8 = Tensor<2, int8_t>(weights.get_ptr<int8_t>(key, mmap_ptr), d0, d1);
+        out.f32 = Tensor<2, float>();
+        out.scales = Tensor<1, float>(weights.get_ptr<float>(meta->scale_name, mmap_ptr), d1);
+        return true;
+    }
+
+    std::fprintf(stderr, "Unsupported tensor dtype %s for %s\n", meta->dtype.c_str(), key.c_str());
+    return false;
+}
+
+static bool bind_embedding_weight(
+    EmbeddingWeight& out,
+    const WeightMap& weights,
+    char* mmap_ptr,
+    const std::string& key,
+    int d0,
+    int d1
+) {
+    const TensorMeta* meta = weights.get_meta(key);
+    if (meta == nullptr) {
+        std::fprintf(stderr, "Missing tensor metadata for %s\n", key.c_str());
+        return false;
+    }
+
+    if (is_float32_meta(*meta)) {
+        out.dtype = MatrixDType::F32;
+        out.f32 = Tensor<2, float>(weights.get_ptr<float>(key, mmap_ptr), d0, d1);
+        out.i8 = Tensor<2, int8_t>();
+        out.scales = Tensor<1, float>();
+        return true;
+    }
+
+    if (is_int8_meta(*meta)) {
+        if (meta->scale_name.empty()) {
+            std::fprintf(stderr, "Quantized embedding %s is missing scale metadata\n", key.c_str());
+            return false;
+        }
+        const TensorMeta* scale_meta = weights.get_meta(meta->scale_name);
+        if (scale_meta == nullptr || !is_float32_meta(*scale_meta)) {
+            std::fprintf(stderr, "Quantized embedding %s has invalid scale tensor %s\n", key.c_str(), meta->scale_name.c_str());
+            return false;
+        }
+        out.dtype = MatrixDType::I8;
+        out.i8 = Tensor<2, int8_t>(weights.get_ptr<int8_t>(key, mmap_ptr), d0, d1);
+        out.f32 = Tensor<2, float>();
+        out.scales = Tensor<1, float>(weights.get_ptr<float>(meta->scale_name, mmap_ptr), d0);
+        return true;
+    }
+
+    std::fprintf(stderr, "Unsupported tensor dtype %s for %s\n", meta->dtype.c_str(), key.c_str());
+    return false;
+}
+
+static inline void matmul_f32(Tensor<1>& out, const Tensor<1>& x, const Tensor<2, float>& w_f32) {
     const int in_dim = x.dim(0);
     const int out_dim = out.dim(0);
     assert(w_f32.dim(0) == in_dim);
     assert(w_f32.dim(1) == out_dim);
 
     for (int j = 0; j < out_dim; ++j) {
-        float acc = 0.0f;
-        for (int i = 0; i < in_dim; ++i) {
-            acc += x[i] * w_f32(i, j);
+        out[j] = 0.0f;
+    }
+
+    for (int i = 0; i < in_dim; ++i) {
+        const float xi = x[i];
+        const float* row = w_f32.data() + i * w_f32.stride(0);
+        for (int j = 0; j < out_dim; ++j) {
+            out[j] += xi * row[j];
         }
-        out[j] = acc;
+    }
+}
+
+static inline void matmul_i8(
+    Tensor<1>& out,
+    const Tensor<1>& x,
+    const Tensor<2, int8_t>& w_i8,
+    const Tensor<1, float>& scales
+) {
+    const int in_dim = x.dim(0);
+    const int out_dim = out.dim(0);
+    assert(w_i8.dim(0) == in_dim);
+    assert(w_i8.dim(1) == out_dim);
+    assert(scales.dim(0) == out_dim);
+
+    for (int j = 0; j < out_dim; ++j) {
+        out[j] = 0.0f;
+    }
+
+    for (int i = 0; i < in_dim; ++i) {
+        const float xi = x[i];
+        const int8_t* row = w_i8.data() + i * w_i8.stride(0);
+        for (int j = 0; j < out_dim; ++j) {
+            out[j] += xi * static_cast<float>(row[j]);
+        }
+    }
+
+    for (int j = 0; j < out_dim; ++j) {
+        out[j] *= scales[j];
+    }
+}
+
+static inline void matmul(
+    Tensor<1> &out,
+    const Tensor<1> &x,
+    const LinearWeight& weight,
+    const char* op_name,
+    int layer_idx,
+    int token_pos
+) {
+    // const bool timing_enabled = matmul_timing_enabled();
+    // const auto start = timing_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    if (weight.dtype == MatrixDType::I8) {
+        matmul_i8(out, x, weight.i8, weight.scales);
+    } else {
+        matmul_f32(out, x, weight.f32);
+    }
+
+    // if (timing_enabled) {
+    //     const auto end = std::chrono::steady_clock::now();
+    //     const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    //     log_kernel_timing(op_name, layer_idx, token_pos, x.dim(0), out.dim(0), elapsed_us);
+    // }
+}
+
+static inline void embedding_lookup(Tensor<1>& out, int token_id, const EmbeddingWeight& embedding) {
+    const int dim = out.dim(0);
+    if (embedding.dtype == MatrixDType::I8) {
+        assert(embedding.i8.dim(0) > token_id);
+        assert(embedding.i8.dim(1) == dim);
+        assert(embedding.scales.dim(0) > token_id);
+        const float row_scale = embedding.scales[token_id];
+        const int8_t* row = embedding.i8.data() + token_id * embedding.i8.stride(0);
+        for (int i = 0; i < dim; ++i) {
+            out[i] = row_scale * static_cast<float>(row[i]);
+        }
+        return;
+    }
+
+    assert(embedding.f32.dim(0) > token_id);
+    assert(embedding.f32.dim(1) == dim);
+    const float* row = embedding.f32.data() + token_id * embedding.f32.stride(0);
+    for (int i = 0; i < dim; ++i) {
+        out[i] = row[i];
+    }
+}
+
+static inline void output_head_projection(
+    Tensor<1>& logits_out,
+    const Tensor<1>& norm_out,
+    const EmbeddingWeight& output_head
+) {
+    const int vocab_size = logits_out.dim(0);
+    const int dim = norm_out.dim(0);
+    if (output_head.dtype == MatrixDType::I8) {
+        assert(output_head.i8.dim(0) == vocab_size);
+        assert(output_head.i8.dim(1) == dim);
+        assert(output_head.scales.dim(0) == vocab_size);
+        for (int j = 0; j < vocab_size; ++j) {
+            float s = 0.0f;
+            const float row_scale = output_head.scales[j];
+            const int8_t* row = output_head.i8.data() + j * output_head.i8.stride(0);
+            for (int i = 0; i < dim; ++i) {
+                s += norm_out[i] * static_cast<float>(row[i]);
+            }
+            logits_out[j] = row_scale * s;
+        }
+        return;
+    }
+
+    assert(output_head.f32.dim(0) == vocab_size);
+    assert(output_head.f32.dim(1) == dim);
+    for (int j = 0; j < vocab_size; ++j) {
+        float s = 0.0f;
+        const float* row = output_head.f32.data() + j * output_head.f32.stride(0);
+        for (int i = 0; i < dim; ++i) {
+            s += norm_out[i] * row[i];
+        }
+        logits_out[j] = s;
     }
 }
 
@@ -92,11 +304,22 @@ void Model::load_weights(WeightMap& w, const std::string& weight_path) {
     std::cout << "Allocating " << n_layers << " transformer blocks..." << std::endl;
     layers = new TransformerBlock[n_layers];
 
-    token_embed = Tensor<2>(
-        w.get_ptr<float>("model.embed_tokens.weight", mmap_data),
-        vocab_size,
-        dim
-    );
+    auto fail_load = [this]() {
+        if (layers) {
+            delete[] layers;
+            layers = nullptr;
+        }
+        if (mmap_data && mmap_size > 0) {
+            munmap(mmap_data, mmap_size);
+            mmap_data = nullptr;
+            mmap_size = 0;
+        }
+    };
+
+    if (!bind_embedding_weight(token_embed, w, mmap_data, "model.embed_tokens.weight", vocab_size, dim)) {
+        fail_load();
+        return;
+    }
     final_norm.weight = Tensor<1>(
         w.get_ptr<float>("model.norm.weight", mmap_data),
         dim
@@ -108,42 +331,16 @@ void Model::load_weights(WeightMap& w, const std::string& weight_path) {
     for (int i = 0; i < n_layers; ++i) {
         const std::string prefix = "model.layers." + std::to_string(i) + ".";
 
-        layers[i].attn.wq = Tensor<2, float>(
-            w.get_ptr<float>(prefix + "self_attn.q_proj.weight", mmap_data),
-            dim,
-            dim
-        );
-        layers[i].attn.wk = Tensor<2, float>(
-            w.get_ptr<float>(prefix + "self_attn.k_proj.weight", mmap_data),
-            dim,
-            kv_dim
-        );
-        layers[i].attn.wv = Tensor<2, float>(
-            w.get_ptr<float>(prefix + "self_attn.v_proj.weight", mmap_data),
-            dim,
-            kv_dim
-        );
-        layers[i].attn.wo = Tensor<2, float>(
-            w.get_ptr<float>(prefix + "self_attn.o_proj.weight", mmap_data),
-            dim,
-            dim
-        );
-
-        layers[i].mlp.w1_gate = Tensor<2, float>(
-            w.get_ptr<float>(prefix + "mlp.gate_proj.weight", mmap_data),
-            dim,
-            hidden_dim
-        );
-        layers[i].mlp.w1_up = Tensor<2, float>(
-            w.get_ptr<float>(prefix + "mlp.up_proj.weight", mmap_data),
-            dim,
-            hidden_dim
-        );
-        layers[i].mlp.w1_down = Tensor<2, float>(
-            w.get_ptr<float>(prefix + "mlp.down_proj.weight", mmap_data),
-            hidden_dim,
-            dim
-        );
+        if (!bind_linear_weight(layers[i].attn.wq, w, mmap_data, prefix + "self_attn.q_proj.weight", dim, dim) ||
+            !bind_linear_weight(layers[i].attn.wk, w, mmap_data, prefix + "self_attn.k_proj.weight", dim, kv_dim) ||
+            !bind_linear_weight(layers[i].attn.wv, w, mmap_data, prefix + "self_attn.v_proj.weight", dim, kv_dim) ||
+            !bind_linear_weight(layers[i].attn.wo, w, mmap_data, prefix + "self_attn.o_proj.weight", dim, dim) ||
+            !bind_linear_weight(layers[i].mlp.w1_gate, w, mmap_data, prefix + "mlp.gate_proj.weight", dim, hidden_dim) ||
+            !bind_linear_weight(layers[i].mlp.w1_up, w, mmap_data, prefix + "mlp.up_proj.weight", dim, hidden_dim) ||
+            !bind_linear_weight(layers[i].mlp.w1_down, w, mmap_data, prefix + "mlp.down_proj.weight", hidden_dim, dim)) {
+            fail_load();
+            return;
+        }
 
         layers[i].pre_attn_norm.weight = Tensor<1, float>(
             w.get_ptr<float>(prefix + "input_layernorm.weight", mmap_data),
@@ -221,6 +418,7 @@ void GQAttention::rope(float* head_vec, int head_dim, int pos, float rope_theta)
 void GQAttention::gqattention(
     Tensor<1>& out,
     const Tensor<1>& x,
+    int layer_idx,
     int pos,
     int n_heads,
     int n_kv_heads,
@@ -237,9 +435,9 @@ void GQAttention::gqattention(
     Tensor<1> q_flat(dim);
     Tensor<1> k_flat(kv_dim_local);
     Tensor<1> v_flat(kv_dim_local);
-    matmul(q_flat, x, wq);
-    matmul(k_flat, x, wk);
-    matmul(v_flat, x, wv);
+    matmul(q_flat, x, wq, "attn.wq", layer_idx, pos);
+    matmul(k_flat, x, wk, "attn.wk", layer_idx, pos);
+    matmul(v_flat, x, wv, "attn.wv", layer_idx, pos);
 
     // Apply RoPE on every query and key in each head.
     for (int h = 0; h < n_heads; ++h) {
@@ -295,25 +493,26 @@ void GQAttention::gqattention(
         }
     }
 
-    matmul(out, ctx_flat, wo);
+    matmul(out, ctx_flat, wo, "attn.wo", layer_idx, pos);
 }
 
-void SwiGLUBlock::swiglu(Tensor<1>& out, const Tensor<1>& in) {
+void SwiGLUBlock::swiglu(Tensor<1>& out, const Tensor<1>& in, int layer_idx, int token_pos) {
     Tensor<1> g(w1_gate.dim(1));
     Tensor<1> u(w1_up.dim(1));
     Tensor<1> h(w1_down.dim(0));
 
-    matmul(g, in, w1_gate);
-    matmul(u, in, w1_up);
+    matmul(g, in, w1_gate, "mlp.gate", layer_idx, token_pos);
+    matmul(u, in, w1_up, "mlp.up", layer_idx, token_pos);
     for (int i = 0; i < h.dim(0); ++i) {
         h[i] = silu(g[i]) * u[i];
     }
 
-    matmul(out, h, w1_down);
+    matmul(out, h, w1_down, "mlp.down", layer_idx, token_pos);
 }
 
 void TransformerBlock::apply_transformer(
     Tensor<1> &x,
+    int layer_idx,
     int pos,
     int n_heads,
     int n_kv_heads,
@@ -329,11 +528,11 @@ void TransformerBlock::apply_transformer(
     Tensor<1> ffn_out(x.dim(0));
 
     pre_attn_norm.rmsnorm(x_norm, x, rms_eps);
-    attn.gqattention(attn_out, x_norm, pos, n_heads, n_kv_heads, head_dim, rope_theta, kcache, vcache);
+    attn.gqattention(attn_out, x_norm, layer_idx, pos, n_heads, n_kv_heads, head_dim, rope_theta, kcache, vcache);
     residual_connection(x, attn_out);
 
     post_ffn_norm.rmsnorm(ffn_in, x, rms_eps);
-    mlp.swiglu(ffn_out, ffn_in);
+    mlp.swiglu(ffn_out, ffn_in, layer_idx, pos);
     residual_connection(x, ffn_out);
 }
 
@@ -353,13 +552,12 @@ void Model::forward(
     A row in token_embed is represented as a 1d tensor Tensor<1> x(dim).
     */
     Tensor<1> x(dim); 
-    for (int i = 0; i < dim; ++i) {
-        x[i] = token_embed(token_id, i);
-    }
+    embedding_lookup(x, token_id, token_embed);
 
     for (int l = 0; l < n_layers; ++l) {
         layers[l].apply_transformer(
             x,
+            l,
             input_pos,
             n_heads,
             n_kv_heads,
@@ -375,11 +573,12 @@ void Model::forward(
     final_norm.rmsnorm(norm_out, x, rms_eps);
 
     // logits_out[j] = dot(norm_out, output_head[j]) with tied output embeddings.
-    for (int j = 0; j < vocab_size; ++j) {
-        float s = 0.0f;
-        for (int i = 0; i < dim; ++i) {
-            s += norm_out[i] * output_head(j, i);
-        }
-        logits_out[j] = s;
-    }
+    // const bool timing_enabled = matmul_timing_enabled();
+    // const auto output_start = timing_enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    output_head_projection(logits_out, norm_out, output_head);
+    // if (timing_enabled) {
+    //     const auto output_end = std::chrono::steady_clock::now();
+    //     const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(output_end - output_start).count();
+    //     log_kernel_timing("output_head", -1, input_pos, dim, vocab_size, elapsed_us, false);
+    // }
 }
