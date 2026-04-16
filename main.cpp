@@ -125,7 +125,7 @@ std::string decode_tokens(const std::vector<int> &tokens, BPEDecode &decoder) {
 
 std::string prompt_from_args(int argc, char** argv) {
     if (argc <= 1) {
-        return "What is the capital of France?";
+        return "What's the capital of France?";
     }
 
     std::string prompt = argv[1];
@@ -145,12 +145,19 @@ int max_new_tokens_from_env_or_default() {
     return (v > 0) ? v : kDefaultMaxNewTokens;
 }
 
+const char* env_or_default(const char* name, const char* fallback) {
+    const char* raw = std::getenv(name);
+    return (raw != nullptr && raw[0] != '\0') ? raw : fallback;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const std::string prompt = prompt_from_args(argc, argv);
     const int max_new_tokens = max_new_tokens_from_env_or_default();
     const bool debug_tokens = debug_tokens_enabled();
+    const char* weight_index_path = env_or_default("WEIGHT_INDEX", "configs/model_index_f32.json");
+    const char* weight_bin_path = env_or_default("WEIGHT_FILE", "llama_f32.bin");
 
     BPEDecode decoder;
     if (!decoder.load("vocab.bin")) {
@@ -171,12 +178,12 @@ int main(int argc, char** argv) {
     }
 
     WeightMap w;
-    if (!w.load("configs/model_index_f32.json")) {
+    if (!w.load(weight_index_path)) {
         std::fprintf(stderr, "Failed to load model index\n");
         return 1;
     }
 
-    m.load_weights(w, "llama_f32.bin");
+    m.load_weights(w, weight_bin_path);
     if (m.layers == nullptr || m.mmap_data == nullptr) {
         std::fprintf(stderr, "Failed to load model weights\n");
         return 1;

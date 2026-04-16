@@ -1,12 +1,46 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 #include "float.h"
 #include "tensor.h"
 #include "weights.h"
+
+enum class MatrixDType {
+    F32,
+    I8,
+};
+
+struct LinearWeight {
+    MatrixDType dtype = MatrixDType::F32;
+    Tensor<2, float> f32;
+    Tensor<2, int8_t> i8;
+    Tensor<1, float> scales;
+
+    int dim(int axis) const {
+        return dtype == MatrixDType::I8 ? i8.dim(axis) : f32.dim(axis);
+    }
+};
+
+struct EmbeddingWeight {
+    MatrixDType dtype = MatrixDType::F32;
+    Tensor<2, float> f32;
+    Tensor<2, int8_t> i8;
+    Tensor<1, float> scales;
+
+    int dim(int axis) const {
+        return dtype == MatrixDType::I8 ? i8.dim(axis) : f32.dim(axis);
+    }
+
+    const void* data() const {
+        return dtype == MatrixDType::I8
+            ? static_cast<const void*>(i8.data())
+            : static_cast<const void*>(f32.data());
+    }
+};
 
 struct RMSNorm {
     Tensor<1, float> weight;
@@ -17,10 +51,10 @@ struct RMSNorm {
 // Grouped Query Attention
 // GQA uses half the dim of q for kv matrices
 struct GQAttention {
-    Tensor<2, float> wq; // [dim, dim]
-    Tensor<2, float> wk; // [dim, kv_dim]
-    Tensor<2, float> wv; // [dim, kv_dim]
-    Tensor<2, float> wo; // [dim, dim]
+    LinearWeight wq; // [dim, dim]
+    LinearWeight wk; // [dim, kv_dim]
+    LinearWeight wv; // [dim, kv_dim]
+    LinearWeight wo; // [dim, dim]
 
     // Apply with RoPE
     // https://arxiv.org/abs/2104.09864
@@ -28,6 +62,7 @@ struct GQAttention {
     void gqattention(
         Tensor<1> &out,
         const Tensor<1> &x,
+        int layer_idx,
         int pos,
         int n_heads,
         int n_kv_heads,
@@ -39,11 +74,11 @@ struct GQAttention {
 };
 
 struct SwiGLUBlock {
-    Tensor<2, float> w1_gate; // Gate projection to hidden dim (4x)
-    Tensor<2, float> w1_up; // Up projection to hidden dim (4x)
-    Tensor<2, float> w1_down; // Down projection to original model dim
+    LinearWeight w1_gate; // Gate projection to hidden dim (4x)
+    LinearWeight w1_up; // Up projection to hidden dim (4x)
+    LinearWeight w1_down; // Down projection to original model dim
 
-    void swiglu(Tensor<1> &out, const Tensor<1> &in);
+    void swiglu(Tensor<1> &out, const Tensor<1> &in, int layer_idx, int token_pos);
 };
 
 struct TransformerBlock {
@@ -54,6 +89,7 @@ struct TransformerBlock {
 
     void apply_transformer(
         Tensor<1> &x,
+        int layer_idx,
         int pos,
         int n_heads,
         int n_kv_heads,
@@ -66,25 +102,25 @@ struct TransformerBlock {
 };
 
 struct Model {
-    int n_layers;
-    int dim; // embedding dimension
-    int kv_dim;
-    int hidden_dim; // larger than dim used for ffn
-    int vocab_size;
-    int n_heads;
-    int n_kv_heads; // Number of key/value heads (for GQA/MQA can be < n_heads)
-    int head_dim; // Per head dim (dim / n_heads)
-    float rope_theta;
-    float rms_eps;
+    int n_layers = 0;
+    int dim = 0; // embedding dimension
+    int kv_dim = 0;
+    int hidden_dim = 0; // larger than dim used for ffn
+    int vocab_size = 0;
+    int n_heads = 0;
+    int n_kv_heads = 0; // Number of key/value heads (for GQA/MQA can be < n_heads)
+    int head_dim = 0; // Per head dim (dim / n_heads)
+    float rope_theta = 0.0f;
+    float rms_eps = 0.0f;
 
     // points to weights address loaded from file
-    char* mmap_data;
-    size_t mmap_size;
+    char* mmap_data = nullptr;
+    size_t mmap_size = 0;
 
-    Tensor<2> token_embed; // embed is a 2d tensor
-    TransformerBlock* layers; // 16 layers for llama3
+    EmbeddingWeight token_embed; // embed is a 2d tensor
+    TransformerBlock* layers = nullptr; // 16 layers for llama3
     RMSNorm final_norm; // just before output projection
-    Tensor<2> output_head;
+    EmbeddingWeight output_head;
 
     Model();
     ~Model();
